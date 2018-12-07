@@ -1,27 +1,79 @@
 function Set-LitigationHold {
+    <#
+    .SYNOPSIS
+    Sets litigation hold for all mailboxes
+
+    .DESCRIPTION
+    Sets litigation hold for all mailboxes and reports on results
+
+    .PARAMETER LogFile
+    Log file created during the process
+    Once the process is complete it is renamed with a time stamp and moved to the Archive Log Path
+
+    .PARAMETER LogFilePath
+    The location of the log file created when the script runs.  This is just the path e.g. c:\results
+
+    .PARAMETER ArchiveLogPath
+    Where the log files are moved.  This is just the path e.g. c:\results\archive
+
+    .PARAMETER Owner
+    This is for logging within 365. The litigation hold will be stamped with the owner you specify here.
+    Use email address format e.g. boss@contoso.com
+
+    .PARAMETER ReplaceCredentials
+    Use this switch to replace the office 365 credentials stored to connect and run this script
+    You will be prompted to enter username and password.  Use this command to do so as an example:
+    Set-LitigationHold -ReplaceCredentials -LogFilePath C:\results
+
+    .EXAMPLE
+    Set-LitigationHold -LogFile litlog.csv -LogFilePath C:\results -ArchiveLogPath C:\results\archive -Owner boss@contoso.com -Verbose
+
+    .NOTES
+    It is necessary to create the directory structure. For the examples mentioned here, create these 3 directories:
+    c:\results
+    c:\results\archive
+    c:\results\SS
+
+    #>
     param
     (
 
         [Parameter()]
         [string] $LogFile,
 
-        [Parameter()]
+        [Parameter(Mandatory)]
         [string] $LogFilePath,
 
         [Parameter()]
         [string] $ArchiveLogPath,
 
         [Parameter()]
-        [string] $Owner
+        [string] $Owner,
+
+        [Parameter()]
+        [switch] $ReplaceCredentials
 
     )
-    
+
     $CurrentErrorActionPref = $ErrorActionPreference
     $ErrorActionPreference = 'Stop'
 
     $Time = Get-Date -Format "yyyy-MM-dd-HHmm"
 
     $LogFilePath = $LogFilePath.Trim('\')
+
+    if (-not $ReplaceCredentials) {
+        $User = Get-Content -Path ("{0}\SS\User.txt" -f $LogFilePath)
+        $Pass = Get-Content -Path ("{0}\SS\Pass.txt" -f $LogFilePath) | ConvertTo-SecureString
+        $Cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $User, $Pass
+    }
+    else {
+        $Credential = Get-Credential -Message "ENTER USERNAME & PASSWORD FOR OFFICE 365/AZURE AD"
+        $Credential.UserName | Out-File ("{0}\SS\User.txt" -f $LogFilePath) -Force
+        $Credential.Password | ConvertFrom-SecureString | Out-File ("{0}\SS\Pass.txt" -f $LogFilePath) -Force
+        break
+    }
+
     $ErrorLogFile = ('Error_{0}') -f $LogFile
 
     $Log = Join-Path $LogFilePath $LogFile
@@ -30,23 +82,20 @@ function Set-LitigationHold {
     Write-Log -Log $Log -AddToLog ("Script executed at {0} " -f $Time)
     Start-Transcript -Path ("{0}\Transcript\Transcript_{1:yyyyMMddhhmm}.log" -f $LogFilePath, $Time)
 
-    $User = Get-Content -Path ("{0}\SS\User.txt" -f $LogFilePath)
-    $Pass = Get-Content -Path ("{0}\SS\Pass.txt" -f $LogFilePath) | ConvertTo-SecureString
-    $Cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $User, $Pass
-    
     $Connect = @{
         Name              = "LitScript"
         ConfigurationName = "Microsoft.Exchange"
         ConnectionUri     = "https://outlook.office365.com/powershell"
         Credential        = $Cred
         Authentication    = "Basic"
-        AllowRedirection  = $True
+        AllowRedirection  = $true
+        Verbose           = $false
     }
-    
+
     $EXOSession = New-PSSession @Connect
-    Import-Module (Import-PSSession $EXOSession -AllowClobber -WarningAction SilentlyContinue) -Global | Out-Null
-    
-    Connect-MsolService -Credential $Cred
+    Import-Module (Import-PSSession $EXOSession -AllowClobber -WarningAction SilentlyContinue -Verbose:$false) -Global -Verbose:$false | Out-Null
+
+    Connect-MsolService -Credential $Cred -Verbose:$false
 
     $HardSplat = @{
         ResultSize           = "Unlimited"
@@ -61,7 +110,7 @@ function Set-LitigationHold {
     }
 
     try {
-        $Hard = Get-Mailbox @HardSplat        
+        $Hard = Get-Mailbox @HardSplat
     }
     catch {
         Write-Log -Log $ErrorLog -AddToLog '=========================================================================================='
@@ -116,23 +165,14 @@ function Set-LitigationHold {
     }
 
     $All = $Hard + $Soft
-    $SoftLicensed = $Soft | Where-Object {
-        (Get-MsolUser -ObjectId $_.ExternalDirectoryObjectId).IsLicensed -eq $True
-    }
-    $HardLicensed = $Hard | Where-Object {
-        (Get-MsolUser -ObjectId $_.ExternalDirectoryObjectId).IsLicensed -eq $True
-    }
-    $SoftProps = $SoftLicensed | select PrimarySmtpAddress, guid, LitigationHoldEnabled, LitigationHoldDuration
-    $HardProps = $HardLicensed | select PrimarySmtpAddress, guid, LitigationHoldEnabled, LitigationHoldDuration
-    $SoftLitCount = ($SoftProps.LitigationHoldEnabled -eq $true).count
-    $SoftNoLitCount = ($SoftProps.LitigationHoldEnabled -eq $false).count
-    $HardLitCount = ($HardProps.LitigationHoldEnabled -eq $true).count
-    $HardNoLitCount = ($HardProps.LitigationHoldEnabled -eq $false).count
-    # $AllCount = $All.count + $Shared.count
-    
+    $AllLitCount = ($All.LitigationHoldEnabled -eq $true).count
+    $AllNoLitCount = ($All.LitigationHoldEnabled -eq $false).count
+    $AllCount = $All.count + $Shared.count
+
+    $SharedProps = $SharedLicensed | select PrimarySmtpAddress, guid, LitigationHoldEnabled, LitigationHoldDuration
     $SharedLit = $SharedLicensed | Where-Object {$_.LitigationHoldEnabled -eq "$true"}
     $SharedLitCount = $SharedLit.guid.count
-    
+
     $SharedNoLit = $SharedLicensed | Where-Object {$_.LitigationHoldEnabled -eq "$false"}
     $SharedNoLitCount = $SharedNoLit.guid.count
 
@@ -148,7 +188,7 @@ function Set-LitigationHold {
     Write-Log -Log $Log -AddToLog '=========================================================================================='
     Write-Log -Log $Log -AddToLog 'Action: Set litigation hold and/or set duration to unlimited'
 
-    $SetHard = $HardPr | Where-Object {
+    $SetHard = $Hard | Where-Object {
         $_.LitigationHoldEnabled -eq $false -or
         $_.LitigationHoldDuration -ne "Unlimited"
     }
@@ -208,7 +248,7 @@ function Set-LitigationHold {
             Write-Log -Log $ErrorLog -AddToLog $_.Exception.Message
         }
     }
-    
+
     foreach ($CurShared in $SetShared) {
         try {
             $SharedMail = $CurShared.PrimarySmtpAddress
@@ -236,10 +276,10 @@ function Set-LitigationHold {
     $SharedLicenseCheck = $SharedCheck | Where-Object {
         (Get-MsolUser -ObjectId $_.ExternalDirectoryObjectId).IsLicensed -eq $True
     }
-    
+
     $AllCheckLit = $HardCheck + $SoftCheck
     $TotalLitCount = $AllCheckLit.count + $SharedLicenseCheck.guid.count
-    
+
     $SharedDur = $SharedLicenseCheck | Where-Object {$_.LitigationHoldDuration -eq "Unlimited"}
     $SharedDurCount = $SharedDur.guid.count
     $AllCheckDur = $AllCheckLit | Where-Object {$_.LitigationHoldDuration -eq "Unlimited"}
@@ -247,7 +287,7 @@ function Set-LitigationHold {
 
     Write-Log -Log $Log -AddToLog ('{0} mailboxes with litigation hold enabled' -f $TotalLitCount)
     Write-Log -Log $Log -AddToLog ('{0} mailboxes with litigation hold enabled and litigation hold duration is unlimited' -f $TotalDurCount)
-    
+
     $AllCheckMail = ($AllCheckLit.PrimarySmtpAddress + $SharedLicenseCheck.PrimarySmtpAddress) | Sort-Object
 
     foreach ($CurCheck in $AllCheckMail) {
